@@ -3,7 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { AudioLines, Search, Play, Pause, SkipBack, SkipForward, Music2, Library, Heart, ListMusic, Download, Headphones, RefreshCw, AlertCircle, Upload, FolderOpen, Settings, BookOpen, Radio, X, Plus, Trash2, Shuffle, Repeat, Repeat1, Volume2, Check, CheckCircle2 } from "lucide-react";
 import { call, changeLibrary, desktop, emptyLibrary, sourceUrl } from "./api";
-import type { DownloadJob, LibraryState, ProviderResult, QuranCatalog, Track } from "./types";
+import type { DownloadJob, LibraryState, ProviderResult, QuranCatalog, StreamSource, Track } from "./types";
 import type { MusifyCatalog } from "./types";
 import { MusifyPanel } from "./MusifyPanel";
 import { YouTubePlayer } from "./YouTubePlayer";
@@ -28,6 +28,30 @@ function savedVolume() {
   } catch {
     return .7;
   }
+}
+function isStreamSource(value: unknown): value is StreamSource {
+  if (!value || typeof value !== "object") return false;
+  const source = value as Record<string, unknown>;
+  return typeof source.id === "string" && typeof source.provider === "string" && typeof source.url === "string";
+}
+function validTracks(value: unknown): Track[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): Track[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const track = entry as Record<string, unknown>;
+    if (typeof track.id !== "string" || !track.id) return [];
+    return [{
+      ...(track as unknown as Track),
+      title: typeof track.title === "string" && track.title ? track.title : "Unknown title",
+      artist: typeof track.artist === "string" && track.artist ? track.artist : "Unknown artist",
+      sources: Array.isArray(track.sources) ? track.sources.filter(isStreamSource).map(source => ({
+        ...source,
+        label: typeof source.label === "string" && source.label ? source.label : source.provider,
+        downloadable: source.downloadable === true,
+      })) : [],
+      providerTrackIds: Array.isArray(track.providerTrackIds) ? track.providerTrackIds.filter((id): id is string => typeof id === "string") : [],
+    }];
+  });
 }
 
 export default function App() {
@@ -95,12 +119,15 @@ export default function App() {
     setProviders(Object.fromEntries(names.map(p => [p, { status: "searching" }])));
     await Promise.all(names.map(async provider => {
       try {
-        const result = await call<ProviderResult>("search_provider", { provider, query: term });
+        const response = await call<ProviderResult>("search_provider", { provider, query: term });
         if (request !== searchSequence.current) return;
-        buckets[provider] = result.tracks;
-        setProviders(p => ({ ...p, [provider]: { status: result.needsConfiguration ? "not-configured" : result.error ? "unavailable" : result.cached ? "cached" : "ready", error: result.error, count: result.tracks.length } }));
+        const result = response && typeof response === "object" ? response : {} as ProviderResult;
+        const tracks = validTracks(result.tracks);
+        buckets[provider] = tracks;
+        const error = typeof result.error === "string" ? result.error : !Array.isArray(result.tracks) || result.error != null ? "Provider returned incomplete search data. Please retry." : undefined;
+        setProviders(p => ({ ...p, [provider]: { status: result.needsConfiguration === true ? "not-configured" : error ? "unavailable" : result.cached === true ? "cached" : "ready", error, count: tracks.length } }));
         const generation = ++mergeSequence.current;
-        const merged = await call<Track[]>("merge_tracks", { tracks: Object.values(buckets).flat() });
+        const merged = validTracks(await call<Track[]>("merge_tracks", { tracks: Object.values(buckets).flat() }));
         if (request === searchSequence.current && generation === mergeSequence.current) setTracks(merged);
       } catch (e) { if (request === searchSequence.current) setProviders(p => ({ ...p, [provider]: { status: "unavailable", error: message(e) } })); }
     }));
@@ -109,11 +136,14 @@ export default function App() {
     const request = searchSequence.current;
     setProviders(p => ({ ...p, [provider]: { status: "searching" } }));
     try {
-      const result = await call<ProviderResult>("search_provider", { provider, query: searched });
+      const response = await call<ProviderResult>("search_provider", { provider, query: searched });
       if (request !== searchSequence.current) return;
-      setProviders(p => ({ ...p, [provider]: { status: result.needsConfiguration ? "not-configured" : result.error ? "unavailable" : result.cached ? "cached" : "ready", error: result.error, count: result.tracks.length } }));
+      const result = response && typeof response === "object" ? response : {} as ProviderResult;
+      const providerTracks = validTracks(result.tracks);
+      const error = typeof result.error === "string" ? result.error : !Array.isArray(result.tracks) || result.error != null ? "Provider returned incomplete search data. Please retry." : undefined;
+      setProviders(p => ({ ...p, [provider]: { status: result.needsConfiguration === true ? "not-configured" : error ? "unavailable" : result.cached === true ? "cached" : "ready", error, count: providerTracks.length } }));
       const generation = ++mergeSequence.current;
-      const merged = await call<Track[]>("merge_tracks", { tracks: [...tracks, ...result.tracks] });
+      const merged = validTracks(await call<Track[]>("merge_tracks", { tracks: [...tracks, ...providerTracks] }));
       if (request === searchSequence.current && generation === mergeSequence.current) setTracks(merged);
     } catch (e) { if (request === searchSequence.current) setProviders(p => ({ ...p, [provider]: { status: "unavailable", error: message(e) } })); }
   }
@@ -124,11 +154,30 @@ export default function App() {
   }
   async function loadCatalog() {
     setCatalogBusy(true);
-    try { setCatalog(await call<QuranCatalog>("quran_catalog")); } catch (e) { setError(`Quran catalog: ${message(e)}`); } finally { setCatalogBusy(false); }
+    try {
+      const result = await call<QuranCatalog>("quran_catalog");
+      if (!result || !Array.isArray(result.chapters) || !Array.isArray(result.chapterReciters) || !Array.isArray(result.verseReciters)) {
+        throw new Error("The catalog response is incomplete. Please retry.");
+      }
+      setCatalog({
+        chapters: result.chapters.filter(chapter => !!chapter && typeof chapter.id === "number" && typeof chapter.name_simple === "string"),
+        chapterReciters: result.chapterReciters.filter(reciter => !!reciter && typeof reciter.id === "number"),
+        verseReciters: result.verseReciters.filter(reciter => !!reciter && typeof reciter.id === "number"),
+      });
+    } catch (e) { setError(`Quran catalog: ${message(e)}`); } finally { setCatalogBusy(false); }
   }
   async function loadMusify() {
     setMusifyBusy(true); setError("");
-    try { setMusify(await call<MusifyCatalog>("musify_catalog")); } catch (e) { setError(message(e)); } finally { setMusifyBusy(false); }
+    try {
+      const result = await call<MusifyCatalog>("musify_catalog");
+      setMusify({
+        ...result,
+        collections: Array.isArray(result?.collections) ? result.collections.filter(item => item && typeof item.id === "string" && typeof item.title === "string" && (item.kind === "album" || item.kind === "playlist") && typeof item.url === "string") : [],
+        radio: validTracks(result?.radio),
+        source: typeof result?.source === "string" ? result.source : "",
+        license: typeof result?.license === "string" ? result.license : "",
+      });
+    } catch (e) { setError(message(e)); } finally { setMusifyBusy(false); }
   }
   useEffect(() => { if (section === "Musify links" && !musify) void loadMusify(); }, [section]);
   async function openLink(url: string) { try { await call("open_link", { url }); } catch (e) { setError(message(e)); } }
@@ -146,7 +195,7 @@ export default function App() {
   async function loadQuran() {
     setQuranBusy(true); setError(""); setTracks([]);
     const request = ++searchSequence.current;
-    try { const found = await call<Track[]>("quran_tracks", { chapter, reciter, mode, ayah, juz }); if (request === searchSequence.current) { setTracks(found); setSearched(mode === "juz" ? `Juz ${juz}` : `Surah ${catalog?.chapters.find(c => c.id === chapter)?.name_simple ?? chapter}`); } }
+    try { const found = validTracks(await call<Track[]>("quran_tracks", { chapter, reciter, mode, ayah, juz })); if (request === searchSequence.current) { setTracks(found); setSearched(mode === "juz" ? `Juz ${juz}` : `Surah ${catalog?.chapters.find(c => c.id === chapter)?.name_simple ?? chapter}`); } }
     catch (e) { setError(message(e)); } finally { setQuranBusy(false); }
   }
   async function importAudio(folder: boolean) {
@@ -316,7 +365,7 @@ export default function App() {
       <div className="sidebar-bottom"><span className={`status-dot ${startupError ? "offline" : ""}`} />{startupError ? "Engine unavailable" : "Local music engine"}<small>No app ads · Your library stays on this device</small></div>
     </aside>
     <main className="main">
-      <header><div><div className="eyebrow">YOUR AUDIO, ONE PLACE</div><h1>{section}</h1><p>{headerSubtitle}</p></div><div className="header-actions"><button className="button subtle" onClick={() => importAudio(false)} disabled={importing || !!startupError}>{importing ? <RefreshCw className="spin" size={16} /> : <Upload size={16} />} Import audio</button>{!androidApp && <button className="icon-button" onClick={() => importAudio(true)} title="Index a music folder" aria-label="Index a music folder" disabled={importing || !!startupError}><FolderOpen size={19} /></button>}</div></header>
+      <header><div><div className="eyebrow">YOUR AUDIO, ONE PLACE</div><h1>{section}</h1><p>{headerSubtitle}</p></div><div className="header-actions"><button className="button subtle" onClick={() => importAudio(false)} disabled={importing || !!startupError} title="Import audio files" aria-label="Import audio files">{importing ? <RefreshCw className="spin" size={16} /> : <Upload size={16} />} Import audio</button>{!androidApp && <button className="icon-button" onClick={() => importAudio(true)} title="Index a music folder" aria-label="Index a music folder" disabled={importing || !!startupError}><FolderOpen size={19} /></button>}</div></header>
       <label className="mobile-nav">Go to<select value={section} onChange={e => navigate(e.target.value as Section)}>{navigation.map(n => <option key={n.title}>{n.title}</option>)}</select></label>
       {startupError && <div className="notice error" role="alert"><AlertCircle size={19} /><div><b>{androidApp ? "Audio engine unavailable" : "Desktop engine unavailable"}</b><p>{startupError}</p>{!androidApp && <p>Use the standalone SoundSphere.exe in C:\dev\SoundSphere, or run npm run tauri dev from that folder.</p>}</div></div>}
       {error && <div className="notice error" role="alert"><AlertCircle size={18} /><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss error"><X size={16} /></button></div>}
@@ -326,7 +375,7 @@ export default function App() {
 
       {searchSection && <>
         <section className="hero"><div className="hero-copy"><div className="eyebrow">{section === "Discover" ? "A WORLD OF INDEPENDENT AUDIO" : `${section.toUpperCase()} COLLECTIONS`}</div><h2>Find your next<br /><span className="gradient">favourite sound.</span></h2><p>Search connected catalogs and your library. Matching recordings stay together, with a choice of streaming sources.</p><form className="search" onSubmit={e => { e.preventDefault(); void runSearch(); }}><Search size={19} /><input aria-label="Search audio" value={query} onChange={e => setQuery(e.target.value)} placeholder={section === "Discover" ? "Search a song, artist or recording…" : `Search ${section.toLowerCase()} or a reciter…`} /><button disabled={!query.trim() || !!startupError}>{busy ? <RefreshCw className="spin" size={17} /> : "Search"}</button></form><div className="suggestions">{(section === "Discover" ? ["lofi", "piano", "ambient"] : [section, `${section} Urdu`, `${section} Arabic`]).map(t => <button key={t} onClick={() => { setQuery(t); void runSearch(t); }}>{t}</button>)}</div></div><div className="hero-art" aria-hidden="true"><div className="orbit" /><div className="orbit outer" /><div className={`disc ${playing ? "rotating" : ""}`}><div className="disc-center"><AudioLines size={40} /></div></div><span className="floating">Multiple sources.<br /><b>One listening space.</b></span></div></section>
-        {Object.keys(providers).length > 0 && <div className="provider-grid">{Object.entries(providers).map(([name, p]) => <div className={`provider-status ${p.status}`} key={name}><div>{p.status === "searching" ? <RefreshCw size={13} className="spin" /> : p.status === "not-configured" ? <Settings size={13} /> : p.status === "unavailable" ? <AlertCircle size={13} /> : <Check size={13} />}<b>{providerNames[name]}</b><small>{p.status === "searching" ? "Searching…" : p.status === "not-configured" ? "Needs setup" : p.status === "unavailable" ? "Unavailable" : `${p.count} results${p.status === "cached" ? " · cached" : ""}`}</small></div>{p.error && <p>{p.error}</p>}{androidApp && name === "youtube" && <p>Search results only; YouTube playback is unavailable on Android.</p>}{p.status === "not-configured" && <button className="provider-action" onClick={() => navigate("Settings")}><Settings size={12} /> Configure Jamendo</button>}{p.status === "unavailable" && <button className="provider-action" disabled={busy} onClick={() => retryProvider(name)}><RefreshCw size={12} /> Retry {providerNames[name]}</button>}</div>)}</div>}
+        {Object.keys(providers).length > 0 && <div className="provider-grid">{Object.entries(providers).map(([name, p]) => <div className={`provider-status ${p.status}`} key={name}><div>{p.status === "searching" ? <RefreshCw size={13} className="spin" /> : p.status === "not-configured" ? <Settings size={13} /> : p.status === "unavailable" ? <AlertCircle size={13} /> : <Check size={13} />}<b>{providerNames[name] ?? name}</b><small>{p.status === "searching" ? "Searching…" : p.status === "not-configured" ? "Needs setup" : p.status === "unavailable" ? "Unavailable" : `${p.count ?? 0} results${p.status === "cached" ? " · cached" : ""}`}</small></div>{p.error && <p>{p.error}</p>}{androidApp && name === "youtube" && <p>Search results only; YouTube playback is unavailable on Android.</p>}{p.status === "not-configured" && <button className="provider-action" onClick={() => navigate("Settings")}><Settings size={12} /> Configure Jamendo</button>}{p.status === "unavailable" && <button className="provider-action" disabled={busy} onClick={() => retryProvider(name)}><RefreshCw size={12} /> Retry {providerNames[name] ?? name}</button>}</div>)}</div>}
       </>}
 
       {section === "Quran / Tilawat" && <section className="panel quran-panel"><div className="panel-heading"><BookOpen size={24} /><div><h2>A quiet space for recitation</h2><p>Quran Foundation audio · EveryAyah alternatives for supported Qaris</p></div></div>{catalogBusy ? <p className="loading"><RefreshCw className="spin" size={18} /> Loading Surahs and reciters…</p> : !catalog ? <button className="button" onClick={loadCatalog}>Retry catalog</button> : <form className="quran-form" onSubmit={e => { e.preventDefault(); void loadQuran(); }}><label>Listen by<select value={mode} onChange={e => { setMode(e.target.value); setReciter(7); }}><option value="surah">Complete Surah</option><option value="ayah">Ayah by Ayah</option><option value="juz">Juz</option></select></label>{mode !== "juz" ? <label>Surah<select value={chapter} onChange={e => { setChapter(Number(e.target.value)); setAyah(0); }}>{catalog.chapters.map(c => <option key={c.id} value={c.id}>{c.id}. {c.name_simple} — {c.name_arabic}</option>)}</select></label> : <label>Juz<select value={juz} onChange={e => setJuz(Number(e.target.value))}>{Array.from({ length: 30 }, (_, i) => <option key={i} value={i + 1}>Juz {i + 1}</option>)}</select></label>}<label>Qari<select value={reciter} onChange={e => setReciter(Number(e.target.value))}>{qaris.map(r => <option key={r.id} value={r.id}>{r.name ?? r.reciter_name}{typeof r.style === "string" && r.style ? ` · ${r.style}` : ""}</option>)}</select></label>{mode === "ayah" && <label>Ayah (0 = all)<input aria-label="Ayah number" type="number" min="0" max={catalog.chapters.find(c => c.id === chapter)?.verses_count ?? 286} value={ayah} onChange={e => setAyah(Number(e.target.value))} /></label>}<button className="button" disabled={quranBusy}>{quranBusy ? <RefreshCw className="spin" size={16} /> : <Headphones size={16} />} Load recitation</button></form>}<small className="attribution">Audio credited to Quran Foundation and the named reciter. Offline downloads are for personal listening under their Developer Terms.</small></section>}
@@ -341,7 +390,7 @@ export default function App() {
       {section === "Discover" && <section className="collections"><div className="section-head"><div><div className="eyebrow">EXPLORE BY TYPE</div><h2>Made for every listening mood</h2></div></div><div className="collection-grid">{[{ name: "Quran / Tilawat", sub: "Surah · Ayah · Qari · Juz", icon: BookOpen, color: "green" }, { name: "Naat", sub: "Reciters and collections", icon: Headphones, color: "rose" }, { name: "Nasheed", sub: "Arabic · Urdu · English", icon: AudioLines, color: "purple" }, { name: "Azan", sub: "Calls to prayer", icon: Radio, color: "blue" }].map(({ name, sub, icon: Icon, color }) => <button key={name} onClick={() => navigate(name as Section)}><span className={`collection-icon ${color}`}><Icon size={22} /></span><b>{name}</b><small>{sub}</small></button>)}</div></section>}
       <div className="page-footnote">SoundSphere · Independent catalogs and your own audio. Availability depends on each provider.</div>
     </main>
-    <footer className="player"><div className="now-playing"><div className="mini-cover"><Music2 size={22} /></div><div><b>{current?.title ?? "Nothing playing"}</b><small>{current?.artist ?? "Choose a recording to begin"}</small><small className="accent">{buffering ? "Connecting…" : playing ? `Playing · ${source?.label}` : current ? "Paused" : ""}</small></div></div><div className="player-controls"><div className="controls"><button className={shuffle ? "enabled" : ""} title="Shuffle" aria-label="Shuffle" aria-pressed={shuffle} onClick={() => setShuffle(!shuffle)}><Shuffle size={15} /></button><button title="Previous" aria-label="Previous track" disabled={!current} onClick={() => next(-1)}><SkipBack size={18} /></button><button className="main-play" aria-label={playing || buffering ? "Pause playback" : "Start playback"} disabled={!current && !playlistLoading} onClick={toggle}>{buffering ? <RefreshCw className="spin" size={19} /> : playing ? <Pause size={19} fill="currentColor" /> : <Play size={19} fill="currentColor" />}</button><button title="Next" aria-label="Next track" disabled={!current} onClick={() => next()}><SkipForward size={18} /></button><button className={repeat !== "off" ? "enabled" : ""} title={`Repeat: ${repeat}`} aria-label={`Repeat: ${repeat}`} onClick={() => setRepeat(repeat === "off" ? "all" : repeat === "all" ? "one" : "off")}>{repeat === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}</button></div><div className="progress"><span data-testid="elapsed">{fmt(elapsed)}</span><input type="range" aria-label="Seek playback" min="0" max={Math.max(1, duration)} step="0.1" value={Math.min(elapsed, duration || 1)} disabled={!current || !duration} onChange={e => seek(Number(e.target.value))} /><span>{fmt(duration)}</span></div></div><div className="player-right"><Volume2 size={17} /><input aria-label="Volume" type="range" min="0" max="1" step="0.01" value={volume} onChange={e => setVolume(Number(e.target.value))} />{current && <select aria-label="Select stream source" value={sourceIndex} onChange={e => chooseSource(Number(e.target.value))}>{current.sources.map((s, i) => <option key={s.id} value={i}>{s.label}</option>)}</select>}</div><audio ref={audio} preload="metadata" /></footer>
+    <footer className="player"><div className="now-playing"><div className="mini-cover"><Music2 size={22} /></div><div><b>{current?.title ?? "Nothing playing"}</b><small>{current?.artist ?? "Choose a recording to begin"}</small><small className="accent">{buffering ? "Connecting…" : playing ? `Playing · ${source?.label}` : current ? "Paused" : ""}</small></div></div><div className="player-controls"><div className="controls"><button className={shuffle ? "enabled" : ""} title="Shuffle" aria-label="Shuffle" aria-pressed={shuffle} onClick={() => setShuffle(!shuffle)}><Shuffle size={15} /></button><button title="Previous" aria-label="Previous track" disabled={!current} onClick={() => next(-1)}><SkipBack size={18} /></button><button className={`main-play ${playing ? "playing" : ""}`} aria-label={playing || buffering ? "Pause playback" : "Start playback"} disabled={!current && !playlistLoading} onClick={toggle}>{buffering ? <RefreshCw className="spin" size={19} /> : playing ? <Pause size={19} fill="currentColor" /> : <Play size={19} fill="currentColor" />}</button><button title="Next" aria-label="Next track" disabled={!current} onClick={() => next()}><SkipForward size={18} /></button><button className={repeat !== "off" ? "enabled" : ""} title={`Repeat: ${repeat}`} aria-label={`Repeat: ${repeat}`} onClick={() => setRepeat(repeat === "off" ? "all" : repeat === "all" ? "one" : "off")}>{repeat === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}</button></div><div className="progress"><span data-testid="elapsed">{fmt(elapsed)}</span><input type="range" aria-label="Seek playback" min="0" max={Math.max(1, duration)} step="0.1" value={Math.min(elapsed, duration || 1)} disabled={!current || !duration} onChange={e => seek(Number(e.target.value))} /><span>{fmt(duration)}</span></div></div><div className="player-right"><Volume2 size={17} /><input aria-label="Volume" type="range" min="0" max="1" step="0.01" value={volume} onChange={e => setVolume(Number(e.target.value))} />{current && <select aria-label="Select stream source" value={sourceIndex} onChange={e => chooseSource(Number(e.target.value))}>{current.sources.map((s, i) => <option key={s.id} value={i}>{s.label}</option>)}</select>}</div><audio ref={audio} preload="metadata" /></footer>
     {playlistModal && <div className="modal-backdrop"><form className="modal" role="dialog" aria-modal="true" aria-label="Create playlist" onSubmit={async e => { e.preventDefault(); const l = await mutate("playlist_create", { name: playlistName }); if (l) { setPlaylistId(l.playlists[l.playlists.length - 1].id); setPlaylistName(""); setPlaylistModal(false); setNotice("Playlist created. Add tracks using their playlist menu."); } }}><div className="section-head"><h2>A new listening space</h2><button type="button" className="icon-button" aria-label="Close playlist dialog" onClick={() => setPlaylistModal(false)}><X size={18} /></button></div><label>Playlist name<input autoFocus required maxLength={100} value={playlistName} onChange={e => setPlaylistName(e.target.value)} placeholder="Evening favourites" /></label><button className="button" disabled={!playlistName.trim()}>Create playlist</button></form></div>}
   </div>;
 }
