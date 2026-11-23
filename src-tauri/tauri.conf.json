@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SoundSphere",
+  "version": "0.1.0",
+  "identifier": "com.soundsphere.player",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "SoundSphere",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 360,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "assetProtocol": { "enable": true, "scope": [] },
+      "csp": "default-src 'self'; script-src 'self'; frame-src 'none'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' asset: http://asset.localhost https: data:; media-src 'self' asset: http://asset.localhost https: blob:; connect-src 'self' ipc: http://ipc.localhost https: ws://localhost:5173 http://localhost:5173"
+    }
+  }
+}

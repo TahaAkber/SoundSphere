@@ -1,0 +1,6 @@
+SoundSphere YouTube audio runtime
+
+yt-dlp 2026.10.26: https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.26
+Official standalone executable, GPL-3.0-or-later combined distribution. Source, build instructions and third-party notices are available at the upstream release. See bundled license files.
+
+This is an independent command-line program. SoundSphere invokes it without a shell, browser cookies, user configuration, remote components or an external JavaScript runtime.

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src-tauri/target/
+.env
+.env.local
+*.log
+test-artifacts/
+SoundSphere.exe
+src-tauri/gen/schemas/
+src-tauri/resources/youtube/*.exe
