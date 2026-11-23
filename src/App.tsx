@@ -20,6 +20,15 @@ const providerNames: Record<string, string> = { audius: "Audius", jamendo: "Jame
 const fmt = (n = 0) => Number.isFinite(n) ? `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, "0")}` : "0:00";
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
 const mb = (n: number) => `${(n / 1_000_000).toFixed(1)} MB`;
+const androidApp = desktop && /android/i.test(navigator.userAgent);
+function savedVolume() {
+  try {
+    const value = Number(localStorage.getItem("soundsphere-volume") ?? ".7");
+    return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : .7;
+  } catch {
+    return .7;
+  }
+}
 
 export default function App() {
   const [section, setSection] = useState<Section>("Discover");
@@ -37,7 +46,7 @@ export default function App() {
   const [current, setCurrent] = useState<Track | null>(null); const [sourceIndex, setSourceIndex] = useState(0); const [revision, setRevision] = useState(0);
   const [playing, setPlaying] = useState(false); const [buffering, setBuffering] = useState(false);
   const [elapsed, setElapsed] = useState(0); const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(() => { const n = Number(localStorage.getItem("soundsphere-volume") ?? ".7"); return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : .7; });
+  const [volume, setVolume] = useState(savedVolume);
   const [shuffle, setShuffle] = useState(false); const [repeat, setRepeat] = useState<"off" | "all" | "one">("off");
   const [health, setHealth] = useState<Record<string, string>>({});
   const [playlistLoading, setPlaylistLoading] = useState(false); const playlistSequence = useRef(0);
@@ -71,7 +80,10 @@ export default function App() {
     }).then(fn => { if (!alive) fn(); else unlisten = fn; }).catch(e => setError(message(e)));
     return () => { alive = false; unlisten?.(); };
   }, []);
-  useEffect(() => { if (audio.current) audio.current.volume = volume; localStorage.setItem("soundsphere-volume", String(volume)); }, [volume]);
+  useEffect(() => {
+    if (audio.current) audio.current.volume = volume;
+    try { localStorage.setItem("soundsphere-volume", String(volume)); } catch { /* Playback still works when storage is unavailable. */ }
+  }, [volume]);
   useEffect(() => { setFilter(""); }, [section]);
 
   async function runSearch(value = query, category = section) {
@@ -79,7 +91,7 @@ export default function App() {
     const term = ["Naat", "Nasheed", "Azan"].includes(category) && !input.toLowerCase().includes(category.toLowerCase()) ? `${category} ${input}` : input;
     const request = ++searchSequence.current; setSearched(term); setError(""); setTracks([]);
     const buckets: Record<string, Track[]> = {};
-    const names = ["local", "audius", "archive", "jamendo", "youtube"];
+    const names = androidApp ? ["local", "audius", "archive", "jamendo"] : ["local", "audius", "archive", "jamendo", "youtube"];
     setProviders(Object.fromEntries(names.map(p => [p, { status: "searching" }])));
     await Promise.all(names.map(async provider => {
       try {
@@ -126,6 +138,7 @@ export default function App() {
   }
   async function addYouTubeLink(url: string) {
     setError("");
+    if (androidApp) { setError("YouTube link playback is currently available in the Windows build. On Android, use another provider or import audio files."); return; }
     try { const track = await call<Track>("resolve_youtube_link", { url }); if (await mutate("save", { track })) { setSection("Your Library"); startTrack(track, [track]); setNotice(`Added “${track.title}” to your library.`); } }
     catch (e) { setError(message(e)); }
   }
@@ -137,16 +150,32 @@ export default function App() {
     catch (e) { setError(message(e)); } finally { setQuranBusy(false); }
   }
   async function importAudio(folder: boolean) {
+    if (androidApp && folder) return;
     setError(""); setImporting(true);
     try {
       const selected = await open({ title: folder ? "Choose your music folder" : "Import audio files", directory: folder, multiple: !folder, filters: folder ? undefined : [{ name: "Audio", extensions: ["mp3", "flac", "wav", "ogg", "m4a", "aac", "opus", "aiff"] }] });
       if (!selected) return;
-      const report = await call<{ library: LibraryState; imported: number; errors: string[] }>("import_audio", { paths: Array.isArray(selected) ? selected : [selected] });
-      setLibrary(report.library); setSection("Your Library"); setNotice(`Imported ${report.imported} audio file${report.imported === 1 ? "" : "s"}.${report.errors.length ? ` ${report.errors.length} skipped: ${report.errors.slice(0, 3).join("; ")}` : ""}`);
-    } catch (e) { setError(message(e)); } finally { setImporting(false); }
+      const selectedPaths = Array.isArray(selected) ? selected : [selected];
+      const copyResults = androidApp
+        ? await Promise.all(selectedPaths.map(uri => call<string>("copy_android_audio", { uri }).then(path => ({ path }), e => ({ error: message(e) }))))
+        : selectedPaths.map(path => ({ path }));
+      const paths = copyResults.flatMap(result => "path" in result ? [result.path] : []);
+      const copyErrors = copyResults.flatMap(result => "error" in result ? [result.error] : []);
+      if (!paths.length) throw new Error(copyErrors[0] ?? "No audio files were selected.");
+      const report = await call<{ library: LibraryState; imported: number; errors: string[] }>("import_audio", { paths });
+      setLibrary(report.library); setSection("Your Library");
+      const errors = [...copyErrors, ...report.errors];
+      setNotice(`Imported ${report.imported} audio file${report.imported === 1 ? "" : "s"}.${errors.length ? `${errors.length} skipped: ${errors.slice(0, 3).join("; ")}` : ""}`);
+    } catch (e) {
+      if (!message(e).toLowerCase().includes("cancel")) setError(message(e));
+    } finally { setImporting(false); }
   }
   function startTrack(track: Track, items = visible) {
     if (!track.sources.length) { setError("This recording has no playable sources."); return; }
+    if (androidApp && track.sources.every(s => s.provider === "youtube" || s.provider === "youtube_audio")) {
+      setError("YouTube playback is currently available in the Windows build. On Android, choose another provider or import audio files.");
+      return;
+    }
     const request = ++playlistSequence.current;
     if (track.sources.some(s => s.provider === "youtube_audio" && s.youtubeKind === "playlist")) {
       audio.current?.pause(); playIntent.current = false;
@@ -166,7 +195,9 @@ export default function App() {
     let index = track.sources.findIndex(s => s.id === preferred);
     if (index < 0) index = track.sources.findIndex(s => Object.values(libraryRef.current.preferences).includes(s.id));
     const local = track.sources.findIndex(s => !!s.localPath);
+    const mobileSource = track.sources.findIndex(s => s.provider !== "youtube" && s.provider !== "youtube_audio");
     const youtubeAudio = track.sources.findIndex(s => s.provider === (youtubeMode.current === "video" ? "youtube" : "youtube_audio"));
+    if (androidApp && (index < 0 || track.sources[index].provider === "youtube" || track.sources[index].provider === "youtube_audio")) index = mobileSource;
     setCurrent(track); setSourceIndex(index >= 0 ? index : local >= 0 ? local : youtubeAudio >= 0 ? youtubeAudio : 0);
     setRevision(n => n + 1); setElapsed(0); setError("");
   }
@@ -197,6 +228,10 @@ export default function App() {
   toggleRef.current = toggle;
   function chooseSource(index: number) {
     if (!current) return;
+    if (androidApp && (current.sources[index].provider === "youtube" || current.sources[index].provider === "youtube_audio")) {
+      setError("YouTube playback is currently available in the Windows build.");
+      return;
+    }
     if (current.sources[index].provider === "youtube") youtubeMode.current = "video";
     else if (current.sources[index].provider === "youtube_audio") youtubeMode.current = "audio";
     seekAfterSwitch.current = position(); failedSources.current.clear(); playIntent.current = true;
@@ -256,10 +291,12 @@ export default function App() {
   }, []);
   useEffect(() => {
     if (!("mediaSession" in navigator) || !current) return;
-    navigator.mediaSession.metadata = new MediaMetadata({ title: current.title, artist: current.artist, album: current.album ?? "SoundSphere", artwork: current.artwork ? [{ src: current.artwork }] : [] });
+    try {
+      if (typeof MediaMetadata !== "undefined") navigator.mediaSession.metadata = new MediaMetadata({ title: current.title, artist: current.artist, album: current.album ?? "SoundSphere", artwork: current.artwork ? [{ src: current.artwork }] : [] });
+    } catch { /* WebViews can expose mediaSession without supporting artwork metadata. */ }
     const actions: [MediaSessionAction, MediaSessionActionHandler][] = [["play", () => { if (!playing) toggleRef.current(); }], ["pause", () => { if (playing) toggleRef.current(); }], ["previoustrack", () => next(-1)], ["nexttrack", () => next()], ["seekto", event => { if (event.seekTime !== undefined) seek(event.seekTime); }]];
     for (const [action, handler] of actions) { try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* WebView may not implement every transport action. */ } }
-    navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+    try { navigator.mediaSession.playbackState = playing ? "playing" : "paused"; } catch { /* Ignore incomplete WebView media-session implementations. */ }
     return () => { for (const [action] of actions) { try { navigator.mediaSession.setActionHandler(action, null); } catch {} } };
   }, [current, sourceIndex, playing, shuffle, repeat]);
   async function enqueue(track: Track, sourceId?: string) {
@@ -279,9 +316,9 @@ export default function App() {
       <div className="sidebar-bottom"><span className={`status-dot ${startupError ? "offline" : ""}`} />{startupError ? "Engine unavailable" : "Local music engine"}<small>No app ads · Your library stays on this device</small></div>
     </aside>
     <main className="main">
-      <header><div><div className="eyebrow">YOUR AUDIO, ONE PLACE</div><h1>{section}</h1><p>{headerSubtitle}</p></div><div className="header-actions"><button className="button subtle" onClick={() => importAudio(false)} disabled={importing || !!startupError}>{importing ? <RefreshCw className="spin" size={16} /> : <Upload size={16} />} Import audio</button><button className="icon-button" onClick={() => importAudio(true)} title="Index a music folder" aria-label="Index a music folder" disabled={importing || !!startupError}><FolderOpen size={19} /></button></div></header>
+      <header><div><div className="eyebrow">YOUR AUDIO, ONE PLACE</div><h1>{section}</h1><p>{headerSubtitle}</p></div><div className="header-actions"><button className="button subtle" onClick={() => importAudio(false)} disabled={importing || !!startupError}>{importing ? <RefreshCw className="spin" size={16} /> : <Upload size={16} />} Import audio</button>{!androidApp && <button className="icon-button" onClick={() => importAudio(true)} title="Index a music folder" aria-label="Index a music folder" disabled={importing || !!startupError}><FolderOpen size={19} /></button>}</div></header>
       <label className="mobile-nav">Go to<select value={section} onChange={e => navigate(e.target.value as Section)}>{navigation.map(n => <option key={n.title}>{n.title}</option>)}</select></label>
-      {startupError && <div className="notice error" role="alert"><AlertCircle size={19} /><div><b>Desktop engine unavailable</b><p>{startupError}</p><p>Use the standalone SoundSphere.exe in C:\dev\SoundSphere, or run npm run tauri dev from that folder.</p></div></div>}
+      {startupError && <div className="notice error" role="alert"><AlertCircle size={19} /><div><b>{androidApp ? "Audio engine unavailable" : "Desktop engine unavailable"}</b><p>{startupError}</p>{!androidApp && <p>Use the standalone SoundSphere.exe in C:\dev\SoundSphere, or run npm run tauri dev from that folder.</p>}</div></div>}
       {error && <div className="notice error" role="alert"><AlertCircle size={18} /><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss error"><X size={16} /></button></div>}
       {notice && <div className="notice info" role="status"><CheckCircle2 size={17} /><span>{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss notice"><X size={16} /></button></div>}
 

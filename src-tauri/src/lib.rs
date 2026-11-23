@@ -20,6 +20,8 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 struct DownloadQueue(Arc<tokio::sync::Semaphore>);
+#[cfg(target_os = "android")]
+struct AndroidAudioImport(tauri::plugin::PluginHandle<tauri::Wry>);
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 fn new_id() -> String {
     format!(
@@ -401,6 +403,31 @@ async fn import_audio(paths: Vec<String>, app: tauri::AppHandle) -> Result<Value
 }
 
 #[tauri::command]
+async fn copy_android_audio(uri: String, app: tauri::AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        if !uri.starts_with("content://") {
+            return Err("Choose an audio file from the Android file picker.".into());
+        }
+        let response: Value = app
+            .state::<AndroidAudioImport>()
+            .0
+            .run_mobile_plugin_async("copyFile", json!({ "uri": uri }))
+            .await
+            .map_err(|e| e.to_string())?;
+        return response["path"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "Android could not access the selected audio file.".into());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (uri, app);
+        Err("Android file import is only available in the Android app.".into())
+    }
+}
+
+#[tauri::command]
 async fn check_source(
     track_id: String,
     source_id: String,
@@ -643,9 +670,23 @@ async fn download_track(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(
+        tauri::plugin::Builder::<tauri::Wry>::new("android-audio-import")
+            .setup(|app, api| {
+                let handle = api.register_android_plugin(
+                    "com.soundsphere.player",
+                    "AudioImportPlugin",
+                )?;
+                app.manage(AndroidAudioImport(handle));
+                Ok(())
+            })
+            .build(),
+    );
+    builder
         .setup(|app| {
             let dir = data_dir(app.handle()).map_err(std::io::Error::other)?;
             std::fs::create_dir_all(&dir)?;
@@ -696,6 +737,7 @@ pub fn run() {
             quran_tracks,
             library_action,
             import_audio,
+            copy_android_audio,
             check_source,
             download_track
         ])

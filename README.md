@@ -1,6 +1,6 @@
 # SoundSphere
 
-**A fast, privacy-focused desktop music player for Windows.**
+**A fast, privacy-focused music player for Windows and Android.**
 
 SoundSphere brings music discovery and playback together in one native Tauri desktop app. Search across multiple providers, organize your library, create playlists, download permitted tracks, listen to Quran recitations or Azan, and play YouTube content without an embedded player.
 
@@ -73,6 +73,20 @@ npm run desktop:build
 
 The build script prepares the pinned YouTube runtime and creates a standalone Windows executable.
 
+### Android build
+
+Install Node.js 20+, Rust stable with the Android targets, a JDK supported by Android Gradle Plugin, and Android SDK Platform/Build Tools plus NDK. On Windows, enable Developer Mode (or build from an elevated terminal) so Tauri can link native Android libraries. Then initialize and run the Android target:
+
+```powershell
+npm ci
+npm run tauri -- android init
+npm run android:dev
+```
+
+Create release APK and AAB packages with `npm run android:build`, or a debug APK with `npm run android:debug`. Android audio imports use the system file picker and copy selected files into SoundSphere's private app storage; Android does not request broad storage access. Folder indexing and YouTube stream playback remain Windows-only. Android playback supports the available HTTPS catalogs, imported audio, and local downloads.
+
+For signed release builds, create `src-tauri/gen/android/app/key.properties` locally with `storeFile`, `storePassword`, `keyAlias`, and `keyPassword`. `storeFile` is relative to that `app` directory unless you use an absolute path. The Android project ignores this file; never commit signing keys or passwords. Without it, Gradle produces unsigned release artifacts.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and set provider values before launching:
@@ -118,8 +132,8 @@ Desktop checks require a running Tauri development instance and the live public 
 
 ## Platform status
 
-- **Windows:** primary and currently maintained target
-- **Android:** not yet implemented or validated
+- **Windows:** primary and maintained target
+- **Android:** native Tauri app target; verify package signing and playback on your device before release
 - **macOS:** not yet packaged or playback-validated
 - **Spotify:** metadata and playlist import are not included in this version
 
