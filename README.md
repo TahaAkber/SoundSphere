@@ -83,7 +83,7 @@ npm run tauri -- android init
 npm run android:dev
 ```
 
-Create release APK and AAB packages with `npm run android:build`, or a debug APK with `npm run android:debug`. Android audio imports use the system file picker and copy selected files into SoundSphere's private app storage; Android does not request broad storage access. Folder indexing and YouTube stream playback remain Windows-only. Android playback supports the available HTTPS catalogs, imported audio, and local downloads.
+Create release APK and AAB packages with `npm run android:build`, or a debug APK with `npm run android:debug`. Android audio imports use the system file picker and copy selected files into SoundSphere's private app storage; Android does not request broad storage access. Folder indexing and YouTube stream playback remain Windows-only; YouTube search metadata is still included on Android. Android playback supports the available HTTPS catalogs, imported audio, and local downloads.
 
 For signed release builds, create `src-tauri/gen/android/app/key.properties` locally with `storeFile`, `storePassword`, `keyAlias`, and `keyPassword`. `storeFile` is relative to that `app` directory unless you use an absolute path. The Android project ignores this file; never commit signing keys or passwords. Without it, Gradle produces unsigned release artifacts.
 
